@@ -115,3 +115,8 @@ Terminal 4 (Gold Analytics):
 Bash
 python 
 src/streaming/gold_aggregation.py
+
+Future enhancements:
+Prometheus & Grafana Integration: Add a docker-compose service for Prometheus and Grafana. Use Spark's built-in metrics system to export streaming latency, throughput (records/sec), and batch duration metrics to Prometheus.
+
+Custom Health Checks: Add a script that monitors the "consumer lag" in Kafka. If the lag exceeds a certain threshold, the pipeline is falling behind in real-time.
