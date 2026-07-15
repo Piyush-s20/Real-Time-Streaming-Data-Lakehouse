@@ -120,3 +120,6 @@ Future enhancements:
 Prometheus & Grafana Integration: Add a docker-compose service for Prometheus and Grafana. Use Spark's built-in metrics system to export streaming latency, throughput (records/sec), and batch duration metrics to Prometheus.
 
 Custom Health Checks: Add a script that monitors the "consumer lag" in Kafka. If the lag exceeds a certain threshold, the pipeline is falling behind in real-time.
+Great Expectations or Deequ: Integrate a validation step in your Silver-to-Gold transition. For example, automatically fail the pipeline or quarantine rows if the trade_price is an extreme outlier (e.g., 3 standard deviations from the mean).
+
+Dead Letter Queue (DLQ): Instead of just "dropping" bad records in the Silver layer, write them to a separate errors/ directory in S3. This allows for post-mortem analysis of why specific data points were rejected.
