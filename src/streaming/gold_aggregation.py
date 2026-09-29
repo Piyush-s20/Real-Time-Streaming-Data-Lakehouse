@@ -1,41 +1,31 @@
-from pyspark.sql import SparkSession
+import sys
+from pathlib import Path
+
 from pyspark.sql.functions import col, window, avg, sum
-from pyspark.sql.types import StructType, StructField, StringType, DoubleType, IntegerType, TimestampType
+
+# Make src/common importable when this file is run as a script
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from common import config  # noqa: E402
+from common.progress import ProgressLogger  # noqa: E402
+from common.spark_session import create_spark_session, wait_for_delta_table  # noqa: E402
+
 
 def main():
     print("Initializing Spark Session for Gold Layer...")
-    
-    spark = SparkSession.builder \
-        .appName("GoldAggregation") \
-        .config("spark.jars.packages", "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262") \
-        .config("spark.hadoop.fs.s3a.endpoint", "http://localhost:9000") \
-        .config("spark.hadoop.fs.s3a.access.key", "admin") \
-        .config("spark.hadoop.fs.s3a.secret.key", "password123") \
-        .config("spark.hadoop.fs.s3a.path.style.access", "true") \
-        .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
-        .getOrCreate()
 
-    spark.sparkContext.setLogLevel("WARN")
-    
-    # 1. Define the Silver schema we are reading from
-    silver_schema = StructType([
-        StructField("trade_id", StringType(), True),
-        StructField("symbol", StringType(), True),
-        StructField("price", DoubleType(), True),
-        StructField("volume", IntegerType(), True),
-        StructField("trade_timestamp", TimestampType(), True),
-        StructField("ingest_timestamp", TimestampType(), True)
-    ])
+    spark = create_spark_session("GoldAggregation")
+    spark.streams.addListener(ProgressLogger("gold"))
 
     print("Reading real-time structured stream from Silver layer...")
-    
-    # 2. Read the Silver Parquet stream
-    silver_df = spark.readStream \
-        .format("parquet") \
-        .schema(silver_schema) \
-        .load("s3a://silver/financial_trades/")
 
-    # 3. Business Logic: Real-time windowed aggregations
+    # 1. Stream the Silver Delta table. Its schema comes from the Delta transaction log.
+    wait_for_delta_table(spark, config.SILVER_TABLE)
+    silver_df = spark.readStream \
+        .format("delta") \
+        .load(config.SILVER_TABLE)
+
+    # 2. Business Logic: Real-time windowed aggregations
     # We group the data by 30-second time windows and the stock symbol.
     gold_df = silver_df \
         .withWatermark("trade_timestamp", "30 seconds") \
@@ -55,18 +45,19 @@ def main():
             col("total_volume")
         )
 
-    print("Calculating metrics and writing to MinIO Gold layer...")
-    print("NOTE: Spark will only write a file to S3 after a 30-second window fully closes!")
-    
-    # 4. Write the aggregated metrics to the Gold bucket
+    print("Calculating metrics and writing to the MinIO Gold Delta table...")
+    print("NOTE: Spark only commits a window to the Gold table after that 30-second window fully closes!")
+
+    # 3. Write the aggregated metrics to the Gold bucket as a Delta table
     query = gold_df.writeStream \
-        .format("parquet") \
+        .format("delta") \
         .option("checkpointLocation", "s3a://gold/checkpoints/financial_metrics/") \
-        .option("path", "s3a://gold/financial_metrics/") \
+        .option("path", config.GOLD_TABLE) \
         .outputMode("append") \
         .start()
 
     query.awaitTermination()
+
 
 if __name__ == "__main__":
     main()

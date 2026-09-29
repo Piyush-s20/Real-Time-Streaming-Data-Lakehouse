@@ -1,21 +1,22 @@
-from pyspark.sql.types import StructType, StructField, StringType, DoubleType, IntegerType, TimestampType
-from pyspark.sql import SparkSession
+import sys
+from pathlib import Path
+
 from pyspark.sql.functions import col, from_json
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType, IntegerType
+
+# Make src/common importable when this file is run as a script
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from common import config  # noqa: E402
+from common.progress import ProgressLogger  # noqa: E402
+from common.spark_session import create_spark_session, wait_for_delta_table  # noqa: E402
+
+
 def main():
     print("Initializing Spark Session for Silver Layer...")
-    
-    spark = SparkSession.builder \
-        .appName("SilverProcessing") \
-        .config("spark.jars.packages", "org.apache.hadoop:hadoop-aws:3.3.4,com.amazonaws:aws-java-sdk-bundle:1.12.262") \
-        .config("spark.hadoop.fs.s3a.endpoint", "http://localhost:9000") \
-        .config("spark.hadoop.fs.s3a.access.key", "admin") \
-        .config("spark.hadoop.fs.s3a.secret.key", "password123") \
-        .config("spark.hadoop.fs.s3a.path.style.access", "true") \
-        .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
-        .getOrCreate()
 
-    spark.sparkContext.setLogLevel("WARN")
+    spark = create_spark_session("SilverProcessing")
+    spark.streams.addListener(ProgressLogger("silver"))
 
     # 1. Define the exact schema we expect from our JSON payload
     # This enforces data quality. Anything that doesn't match this schema will be handled safely.
@@ -24,23 +25,16 @@ def main():
         StructField("symbol", StringType(), True),
         StructField("price", DoubleType(), True),
         StructField("volume", IntegerType(), True),
-        StructField("timestamp", StringType(), True) 
+        StructField("timestamp", StringType(), True)
     ])
 
-    # Because we are reading from Parquet directories, Spark needs to know the schema of the Bronze layer
-    # Because we are reading from Parquet directories, Spark needs to know the schema of the Bronze layer
-    bronze_schema = StructType([
-        StructField("raw_payload", StringType(), True),
-        StructField("kafka_ingest_time", TimestampType(), True) # <-- Changed from StringType
-    ])
+    print("Reading real-time Delta stream from Bronze layer...")
 
-    print("Reading real-time Parquet stream from Bronze layer...")
-    
-    # 2. Read the streaming Parquet files from Bronze
+    # 2. Stream the Bronze Delta table. Its schema comes from the Delta transaction log.
+    wait_for_delta_table(spark, config.BRONZE_TABLE)
     bronze_df = spark.readStream \
-        .format("parquet") \
-        .schema(bronze_schema) \
-        .load("s3a://bronze/financial_trades/")
+        .format("delta") \
+        .load(config.BRONZE_TABLE)
 
     # 3. Clean and transform the data
     # We parse the JSON string into a structured format, and pull the nested fields up into top-level columns
@@ -56,17 +50,18 @@ def main():
         ) \
         .filter(col("price").isNotNull() & (col("price") > 0)) # Basic Data Quality Check: Drop invalid prices
 
-    print("Writing cleansed data to MinIO Silver layer...")
-    
-    # 4. Write the structured data to the Silver bucket
+    print("Writing cleansed data to the MinIO Silver Delta table...")
+
+    # 4. Write the structured data to the Silver bucket as a Delta table
     query = silver_df.writeStream \
-        .format("parquet") \
+        .format("delta") \
         .option("checkpointLocation", "s3a://silver/checkpoints/financial_trades/") \
-        .option("path", "s3a://silver/financial_trades/") \
+        .option("path", config.SILVER_TABLE) \
         .outputMode("append") \
         .start()
 
     query.awaitTermination()
+
 
 if __name__ == "__main__":
     main()
