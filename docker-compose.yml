@@ -1,9 +1,7 @@
-version: '3.8'
-
+# Credentials are read from .env (see .env.example); the defaults below are for local use only.
 services:
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.0
-    container_name: zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
@@ -12,7 +10,6 @@ services:
 
   kafka:
     image: confluentinc/cp-kafka:7.4.0
-    container_name: kafka
     depends_on:
       - zookeeper
     ports:
@@ -27,27 +24,46 @@ services:
 
   minio:
     image: minio/minio:latest
-    container_name: minio
     ports:
       - "9000:9000"   # API Port
       - "9001:9001"   # Console UI Port
     environment:
-      MINIO_ROOT_USER: admin
-      MINIO_ROOT_PASSWORD: password123
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-password123}
     command: server /data --console-address ":9001"
 
   minio-setup:
     image: minio/mc:latest
-    container_name: minio-setup
     depends_on:
       - minio
     entrypoint: >
       /bin/sh -c "
-      sleep 5;
-      mc alias set myminio http://minio:9000 admin password123;
-      mc mb myminio/bronze;
-      mc mb myminio/silver;
-      mc mb myminio/gold;
+      until mc alias set myminio http://minio:9000 ${MINIO_ACCESS_KEY:-admin} ${MINIO_SECRET_KEY:-password123}; do sleep 1; done;
+      mc mb --ignore-existing myminio/bronze;
+      mc mb --ignore-existing myminio/silver;
+      mc mb --ignore-existing myminio/gold;
       echo 'Medallion buckets created successfully.';
       exit 0;
       "
+
+  airflow:
+    build: ./docker/airflow
+    depends_on:
+      - minio
+    ports:
+      - "8080:8080"   # Web UI
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      # The image entrypoint creates the metadata DB and the web UI login before `airflow standalone` starts
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USER:-admin}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-admin}
+      # AWS connection "minio_s3" whose endpoint_url points to MinIO (used by the DAG's sensor and report task)
+      AIRFLOW_CONN_MINIO_S3: >-
+        {"conn_type": "aws", "login": "${MINIO_ACCESS_KEY:-admin}", "password": "${MINIO_SECRET_KEY:-password123}",
+        "extra": {"endpoint_url": "http://minio:9000", "region_name": "us-east-1",
+        "config_kwargs": {"s3": {"addressing_style": "path"}}}}
+    volumes:
+      - ./dags:/opt/airflow/dags
+    command: standalone
